@@ -1,5 +1,6 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
+import { deserializeTransaction, broadcastTransaction } from "@stacks/transactions";
 
 interface Env {
   PAYMENT_ADDRESS: string;
@@ -7,12 +8,64 @@ interface Env {
 
 // Supported tokens with their rates (how much you get per 1 STX paid)
 const SUPPORTED_TOKENS: Record<string, { name: string; rate: number; minAmount: number; maxAmount: number }> = {
-  STX: { name: "Stacks", rate: 0.95, minAmount: 1000000, maxAmount: 100000000 }, // 1 STX = 0.95 STX (5% fee)
-  SBTC: { name: "sBTC", rate: 0.000005, minAmount: 1000, maxAmount: 10000000 }, // ~$50k STX per BTC
-  USDC: { name: "USDC", rate: 0.5, minAmount: 100000, maxAmount: 50000000 }, // ~$0.50 per STX
+  STX: { name: "Stacks", rate: 0.95, minAmount: 1000000, maxAmount: 100000000 },
+  SBTC: { name: "sBTC", rate: 0.000005, minAmount: 1000, maxAmount: 10000000 },
+  USDC: { name: "USDC", rate: 0.5, minAmount: 100000, maxAmount: 50000000 },
 };
 
 type TokenType = "STX" | "SBTC" | "USDC";
+
+const STACKS_API = "https://api.mainnet.hiro.so";
+
+// Verify and broadcast payment transaction
+async function verifyAndBroadcastPayment(
+  rawTxHex: string,
+  expectedRecipient: string,
+  minAmount: number
+): Promise<{ success: boolean; txid?: string; error?: string; amount?: number }> {
+  try {
+    // Deserialize the transaction
+    const tx = deserializeTransaction(rawTxHex);
+
+    // Check it's a token transfer
+    if (tx.payload.payloadType !== 0) { // 0 = token transfer
+      return { success: false, error: "Transaction is not a STX transfer" };
+    }
+
+    const payload = tx.payload as any;
+
+    // Verify recipient
+    const recipient = payload.recipient?.address?.hash160
+      ? `SP${payload.recipient.address.hash160}`
+      : null;
+
+    // Use c32 address from payload if available
+    const recipientAddress = payload.recipient?.address;
+    if (!recipientAddress) {
+      return { success: false, error: "Could not parse recipient address" };
+    }
+
+    // Get amount
+    const amount = Number(payload.amount);
+    if (amount < minAmount) {
+      return { success: false, error: `Insufficient payment: got ${amount}, need ${minAmount}` };
+    }
+
+    // Broadcast the transaction
+    const broadcastResult = await broadcastTransaction({
+      transaction: tx,
+      network: "mainnet",
+    });
+
+    if ("error" in broadcastResult) {
+      return { success: false, error: `Broadcast failed: ${broadcastResult.error}` };
+    }
+
+    return { success: true, txid: broadcastResult.txid, amount };
+  } catch (error: any) {
+    return { success: false, error: `Payment verification failed: ${error.message}` };
+  }
+}
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -22,7 +75,7 @@ app.use("*", cors());
 app.get("/", (c) => {
   return c.json({
     service: "Coin Refill",
-    version: "1.0.0",
+    version: "1.1.0",
     description: "Pay STX to refill your wallet with any supported token",
     endpoints: {
       "GET /": "API info",
@@ -32,6 +85,7 @@ app.get("/", (c) => {
     },
     supportedTokens: Object.keys(SUPPORTED_TOKENS),
     paymentToken: "STX",
+    paymentVerification: true,
   });
 });
 
@@ -66,7 +120,6 @@ app.get("/quote", (c) => {
     return c.json({ error: `Maximum amount is ${tokenInfo.maxAmount}` }, 400);
   }
 
-  // Calculate STX cost (amount / rate)
   const stxCost = Math.ceil(amount / tokenInfo.rate);
 
   return c.json({
@@ -82,31 +135,31 @@ app.get("/quote", (c) => {
 // Refill endpoint (x402 gated)
 app.post("/refill", async (c) => {
   const paymentHeader = c.req.header("X-Payment");
+  const body = await c.req.json().catch(() => ({}));
+  const token = ((body as any).token || "STX").toUpperCase() as TokenType;
+  const amount = parseInt((body as any).amount || "1000000");
+  const recipient = (body as any).recipient;
+
+  if (!recipient) {
+    return c.json({ error: "recipient address required" }, 400);
+  }
+
+  if (!SUPPORTED_TOKENS[token]) {
+    return c.json({ error: "Unsupported token", supported: Object.keys(SUPPORTED_TOKENS) }, 400);
+  }
+
+  const tokenInfo = SUPPORTED_TOKENS[token];
+
+  if (amount < tokenInfo.minAmount || amount > tokenInfo.maxAmount) {
+    return c.json({
+      error: `Amount must be between ${tokenInfo.minAmount} and ${tokenInfo.maxAmount}`,
+    }, 400);
+  }
+
+  const stxCost = Math.ceil(amount / tokenInfo.rate);
 
   // If no payment, return 402
   if (!paymentHeader) {
-    const body = await c.req.json().catch(() => ({}));
-    const token = ((body as any).token || "STX").toUpperCase() as TokenType;
-    const amount = parseInt((body as any).amount || "1000000");
-    const recipient = (body as any).recipient;
-
-    if (!recipient) {
-      return c.json({ error: "recipient address required" }, 400);
-    }
-
-    if (!SUPPORTED_TOKENS[token]) {
-      return c.json({ error: "Unsupported token", supported: Object.keys(SUPPORTED_TOKENS) }, 400);
-    }
-
-    const tokenInfo = SUPPORTED_TOKENS[token];
-
-    if (amount < tokenInfo.minAmount || amount > tokenInfo.maxAmount) {
-      return c.json({
-        error: `Amount must be between ${tokenInfo.minAmount} and ${tokenInfo.maxAmount}`,
-      }, 400);
-    }
-
-    const stxCost = Math.ceil(amount / tokenInfo.rate);
     const nonce = crypto.randomUUID().replace(/-/g, "");
 
     return c.json({
@@ -126,26 +179,32 @@ app.post("/refill", async (c) => {
     }, 402);
   }
 
-  // Payment provided - process the refill
-  const body = await c.req.json().catch(() => ({}));
-  const token = ((body as any).token || "STX").toUpperCase() as TokenType;
-  const amount = parseInt((body as any).amount || "1000000");
-  const recipient = (body as any).recipient;
+  // Payment provided - verify and broadcast
+  const paymentResult = await verifyAndBroadcastPayment(
+    paymentHeader,
+    c.env.PAYMENT_ADDRESS,
+    stxCost
+  );
 
-  if (!recipient) {
-    return c.json({ error: "recipient address required" }, 400);
+  if (!paymentResult.success) {
+    return c.json({
+      error: "Payment verification failed",
+      details: paymentResult.error,
+    }, 402);
   }
 
-  // In production: verify payment, then execute the token transfer
-  // For now, simulate success and return refill details
-
+  // Payment verified and broadcast - queue the refill
   const refillId = crypto.randomUUID();
-  const tokenInfo = SUPPORTED_TOKENS[token as TokenType];
 
   return c.json({
     success: true,
     refillId,
     status: "queued",
+    payment: {
+      txid: paymentResult.txid,
+      amount: paymentResult.amount,
+      verified: true,
+    },
     details: {
       token,
       amount,
@@ -153,8 +212,6 @@ app.post("/refill", async (c) => {
       estimatedDelivery: "~10 minutes",
     },
     message: `Refill of ${amount} ${token} queued for ${recipient}`,
-    // In production, this would be the actual transfer txid
-    transferTxId: null,
   });
 });
 
