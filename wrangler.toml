@@ -1,0 +1,7 @@
+name = "coin-refill"
+main = "src/index.ts"
+compatibility_date = "2024-01-01"
+workers_dev = true
+
+[vars]
+PAYMENT_ADDRESS = "SP1734723Q6206N1BAWQCJ5H9YFQBEPB96DRQB7KC"
