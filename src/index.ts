@@ -27,31 +27,20 @@ async function verifyAndBroadcastPayment(
     // Deserialize the transaction
     const tx = deserializeTransaction(rawTxHex);
 
-    // Check it's a token transfer
-    if (tx.payload.payloadType !== 0) { // 0 = token transfer
+    // Check it's a token transfer (payloadType 0 = token transfer)
+    if (tx.payload.payloadType !== 0) {
       return { success: false, error: "Transaction is not a STX transfer" };
     }
 
     const payload = tx.payload as any;
 
-    // Verify recipient
-    const recipient = payload.recipient?.address?.hash160
-      ? `SP${payload.recipient.address.hash160}`
-      : null;
-
-    // Use c32 address from payload if available
-    const recipientAddress = payload.recipient?.address;
-    if (!recipientAddress) {
-      return { success: false, error: "Could not parse recipient address" };
-    }
-
-    // Get amount
+    // Get amount - this is the key verification
     const amount = Number(payload.amount);
     if (amount < minAmount) {
       return { success: false, error: `Insufficient payment: got ${amount}, need ${minAmount}` };
     }
 
-    // Broadcast the transaction
+    // Broadcast the transaction to mainnet
     const broadcastResult = await broadcastTransaction({
       transaction: tx,
       network: "mainnet",
