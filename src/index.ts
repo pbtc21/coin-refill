@@ -14,7 +14,7 @@ interface Env {
 
 // Supported tokens with their rates (how much you get per 1 STX paid)
 const SUPPORTED_TOKENS: Record<string, { name: string; rate: number; minAmount: number; maxAmount: number }> = {
-  STX: { name: "Stacks", rate: 0.95, minAmount: 1000000, maxAmount: 100000000 },
+  STX: { name: "Stacks", rate: 0.95, minAmount: 1000, maxAmount: 100000000 }, // min 0.001 STX
 };
 
 type TokenType = "STX";

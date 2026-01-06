@@ -5,7 +5,7 @@ compatibility_flags = ["nodejs_compat"]
 workers_dev = true
 
 [vars]
-# Payments go here (revenue), refills come from REFILL_PRIVATE_KEY wallet
-PAYMENT_ADDRESS = "SPAAJMEECTP070DR03X5NTA9GZHFKD5Z9H9TG23C"
+# Same wallet for payments and refills (self-funding)
+PAYMENT_ADDRESS = "SP2QXPFF4M72QYZWXE7S5321XJDJ2DD32DGEMN5QA"
 
 # REFILL_PRIVATE_KEY is set via `wrangler secret put REFILL_PRIVATE_KEY`
