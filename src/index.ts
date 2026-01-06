@@ -1,46 +1,43 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
-import { deserializeTransaction, broadcastTransaction } from "@stacks/transactions";
+import {
+  deserializeTransaction,
+  broadcastTransaction,
+  makeSTXTokenTransfer,
+  AnchorMode,
+} from "@stacks/transactions";
 
 interface Env {
   PAYMENT_ADDRESS: string;
+  REFILL_PRIVATE_KEY: string; // Secret: private key for the refill wallet
 }
 
 // Supported tokens with their rates (how much you get per 1 STX paid)
 const SUPPORTED_TOKENS: Record<string, { name: string; rate: number; minAmount: number; maxAmount: number }> = {
   STX: { name: "Stacks", rate: 0.95, minAmount: 1000000, maxAmount: 100000000 },
-  SBTC: { name: "sBTC", rate: 0.000005, minAmount: 1000, maxAmount: 10000000 },
-  USDC: { name: "USDC", rate: 0.5, minAmount: 100000, maxAmount: 50000000 },
 };
 
-type TokenType = "STX" | "SBTC" | "USDC";
+type TokenType = "STX";
 
-const STACKS_API = "https://api.mainnet.hiro.so";
-
-// Verify and broadcast payment transaction
+// Verify and broadcast incoming payment
 async function verifyAndBroadcastPayment(
   rawTxHex: string,
-  expectedRecipient: string,
   minAmount: number
 ): Promise<{ success: boolean; txid?: string; error?: string; amount?: number }> {
   try {
-    // Deserialize the transaction
     const tx = deserializeTransaction(rawTxHex);
 
-    // Check it's a token transfer (payloadType 0 = token transfer)
     if (tx.payload.payloadType !== 0) {
       return { success: false, error: "Transaction is not a STX transfer" };
     }
 
     const payload = tx.payload as any;
-
-    // Get amount - this is the key verification
     const amount = Number(payload.amount);
+
     if (amount < minAmount) {
       return { success: false, error: `Insufficient payment: got ${amount}, need ${minAmount}` };
     }
 
-    // Broadcast the transaction to mainnet
     const broadcastResult = await broadcastTransaction({
       transaction: tx,
       network: "mainnet",
@@ -56,6 +53,37 @@ async function verifyAndBroadcastPayment(
   }
 }
 
+// Send the actual refill to recipient
+async function sendRefill(
+  privateKey: string,
+  recipient: string,
+  amount: number
+): Promise<{ success: boolean; txid?: string; error?: string }> {
+  try {
+    const tx = await makeSTXTokenTransfer({
+      recipient,
+      amount: BigInt(amount),
+      memo: "coin-refill",
+      senderKey: privateKey,
+      network: "mainnet",
+      anchorMode: AnchorMode.Any,
+    } as any);
+
+    const broadcastResult = await broadcastTransaction({
+      transaction: tx,
+      network: "mainnet",
+    });
+
+    if ("error" in broadcastResult) {
+      return { success: false, error: `Refill broadcast failed: ${broadcastResult.error}` };
+    }
+
+    return { success: true, txid: broadcastResult.txid };
+  } catch (error: any) {
+    return { success: false, error: `Refill failed: ${error.message}` };
+  }
+}
+
 const app = new Hono<{ Bindings: Env }>();
 
 app.use("*", cors());
@@ -64,8 +92,8 @@ app.use("*", cors());
 app.get("/", (c) => {
   return c.json({
     service: "Coin Refill",
-    version: "1.1.0",
-    description: "Pay STX to refill your wallet with any supported token",
+    version: "2.0.0",
+    description: "Pay STX to refill any wallet with STX (5% fee)",
     endpoints: {
       "GET /": "API info",
       "GET /tokens": "List supported tokens and rates",
@@ -75,6 +103,7 @@ app.get("/", (c) => {
     supportedTokens: Object.keys(SUPPORTED_TOKENS),
     paymentToken: "STX",
     paymentVerification: true,
+    instantDelivery: true,
   });
 });
 
@@ -117,7 +146,7 @@ app.get("/quote", (c) => {
     requestedAmount: amount,
     stxCost,
     rate: tokenInfo.rate,
-    feePercent: token === "STX" ? 5 : 2,
+    feePercent: 5,
   });
 });
 
@@ -129,8 +158,13 @@ app.post("/refill", async (c) => {
   const amount = parseInt((body as any).amount || "1000000");
   const recipient = (body as any).recipient;
 
+  // Validate inputs
   if (!recipient) {
     return c.json({ error: "recipient address required" }, 400);
+  }
+
+  if (!recipient.startsWith("SP") && !recipient.startsWith("ST")) {
+    return c.json({ error: "Invalid Stacks address" }, 400);
   }
 
   if (!SUPPORTED_TOKENS[token]) {
@@ -168,12 +202,16 @@ app.post("/refill", async (c) => {
     }, 402);
   }
 
+  // Check if refill wallet is configured
+  if (!c.env.REFILL_PRIVATE_KEY) {
+    return c.json({
+      error: "Service not configured",
+      details: "Refill wallet not set up",
+    }, 503);
+  }
+
   // Payment provided - verify and broadcast
-  const paymentResult = await verifyAndBroadcastPayment(
-    paymentHeader,
-    c.env.PAYMENT_ADDRESS,
-    stxCost
-  );
+  const paymentResult = await verifyAndBroadcastPayment(paymentHeader, stxCost);
 
   if (!paymentResult.success) {
     return c.json({
@@ -182,31 +220,46 @@ app.post("/refill", async (c) => {
     }, 402);
   }
 
-  // Payment verified and broadcast - queue the refill
-  const refillId = crypto.randomUUID();
+  // Payment verified - now send the refill immediately
+  const refillResult = await sendRefill(c.env.REFILL_PRIVATE_KEY, recipient, amount);
 
+  if (!refillResult.success) {
+    // Payment succeeded but refill failed - this is bad!
+    // Log the payment txid so we can manually refund/retry
+    console.error(`REFILL FAILED - Payment txid: ${paymentResult.txid}, recipient: ${recipient}, amount: ${amount}, error: ${refillResult.error}`);
+
+    return c.json({
+      error: "Refill failed after payment",
+      details: refillResult.error,
+      paymentTxid: paymentResult.txid,
+      message: "Your payment was received. Please contact support with your payment txid for a refund.",
+    }, 500);
+  }
+
+  // Success!
   return c.json({
     success: true,
-    refillId,
-    status: "queued",
     payment: {
       txid: paymentResult.txid,
       amount: paymentResult.amount,
-      verified: true,
     },
-    details: {
+    refill: {
+      txid: refillResult.txid,
       token,
       amount,
       recipient,
-      estimatedDelivery: "~10 minutes",
     },
-    message: `Refill of ${amount} ${token} queued for ${recipient}`,
+    message: `Sent ${amount / 1000000} STX to ${recipient}`,
   });
 });
 
 // Health check
 app.get("/health", (c) => {
-  return c.json({ status: "ok", timestamp: new Date().toISOString() });
+  return c.json({
+    status: "ok",
+    timestamp: new Date().toISOString(),
+    refillWalletConfigured: !!c.env?.REFILL_PRIVATE_KEY,
+  });
 });
 
 export default app;

@@ -1,7 +1,11 @@
 name = "coin-refill"
 main = "src/index.ts"
 compatibility_date = "2024-01-01"
+compatibility_flags = ["nodejs_compat"]
 workers_dev = true
 
 [vars]
-PAYMENT_ADDRESS = "SP31JEZWX4S131326VKM05QKJ0TDGNVVE0CDWWVA2"
+# Payments go here (revenue), refills come from REFILL_PRIVATE_KEY wallet
+PAYMENT_ADDRESS = "SPAAJMEECTP070DR03X5NTA9GZHFKD5Z9H9TG23C"
+
+# REFILL_PRIVATE_KEY is set via `wrangler secret put REFILL_PRIVATE_KEY`
