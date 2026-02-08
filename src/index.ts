@@ -160,6 +160,66 @@ app.get("/quote", (c) => {
   });
 });
 
+// x402 discovery for /refill endpoint
+app.get("/refill", (c) => {
+  const tokenInfo = SUPPORTED_TOKENS.STX;
+  // Default quote: 1 STX (1,000,000 microSTX)
+  const defaultAmount = 1000000;
+  const stxCost = Math.ceil(defaultAmount / tokenInfo.rate);
+
+  return c.json({
+    x402Version: 1,
+    name: "Coin Refill",
+    accepts: [
+      {
+        scheme: "exact",
+        network: "stacks",
+        maxAmountRequired: stxCost.toString(),
+        resource: "/refill",
+        description: "Refill wallets with STX (5% fee). Send POST with {token, amount, recipient}",
+        mimeType: "application/json",
+        payTo: c.env.PAYMENT_ADDRESS,
+        maxTimeoutSeconds: 300,
+        asset: "STX",
+        outputSchema: {
+          input: {
+            type: "object",
+            properties: {
+              token: { type: "string", enum: ["STX"], description: "Token to receive" },
+              amount: { type: "integer", description: "Amount in microSTX (min 1000, max 100000000)" },
+              recipient: { type: "string", description: "Stacks address to receive refill" },
+            },
+            required: ["recipient"],
+          },
+          output: {
+            type: "object",
+            properties: {
+              success: { type: "boolean" },
+              payment: {
+                type: "object",
+                properties: {
+                  txid: { type: "string" },
+                  amount: { type: "integer" },
+                },
+              },
+              refill: {
+                type: "object",
+                properties: {
+                  txid: { type: "string" },
+                  token: { type: "string" },
+                  amount: { type: "integer" },
+                  recipient: { type: "string" },
+                },
+              },
+              message: { type: "string" },
+            },
+          },
+        },
+      },
+    ],
+  });
+});
+
 // Helper to get payment token type from request
 function getPaymentTokenType(c: any): PaymentTokenType {
   const queryToken = c.req.query("payWith");
