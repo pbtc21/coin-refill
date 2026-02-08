@@ -6,6 +6,6 @@ workers_dev = true
 
 [vars]
 # Same wallet for payments and refills (self-funding)
-PAYMENT_ADDRESS = "SP2QXPFF4M72QYZWXE7S5321XJDJ2DD32DGEMN5QA"
+PAYMENT_ADDRESS = "SPKH9AWG0ENZ87J1X0PBD4HETP22G8W22AFNVF8K"
 
 # REFILL_PRIVATE_KEY is set via `wrangler secret put REFILL_PRIVATE_KEY`

@@ -18,6 +18,16 @@ const SUPPORTED_TOKENS: Record<string, { name: string; rate: number; minAmount: 
 };
 
 type TokenType = "STX";
+type PaymentTokenType = "STX" | "sBTC";
+
+// sBTC contract for payment
+const SBTC_CONTRACT = "SP3K8BC0PPEVCV7NZ6QSRWPQ2JE9E5B6N3PA0KBR9.token-sbtc";
+
+// Payment rates: how much STX you get per payment token
+const PAYMENT_RATES: Record<PaymentTokenType, number> = {
+  STX: 1,      // 1 STX = 1 STX value
+  sBTC: 50000, // 1 sat ≈ $0.001 ≈ 0.05 STX (rough equivalence)
+};
 
 // Verify and broadcast incoming payment
 async function verifyAndBroadcastPayment(
@@ -93,15 +103,15 @@ app.get("/", (c) => {
   return c.json({
     service: "Coin Refill",
     version: "2.0.0",
-    description: "Pay STX to refill any wallet with STX (5% fee)",
+    description: "Pay STX or sBTC to refill any wallet with STX (5% fee)",
     endpoints: {
       "GET /": "API info",
       "GET /tokens": "List supported tokens and rates",
-      "GET /quote": "Get a quote for a refill (params: token, amount)",
+      "GET /quote": "Get a quote for a refill (params: token, amount, payWith)",
       "POST /refill": "Request a refill (x402 gated)",
     },
     supportedTokens: Object.keys(SUPPORTED_TOKENS),
-    paymentToken: "STX",
+    paymentTokens: ["STX", "sBTC"],
     paymentVerification: true,
     instantDelivery: true,
   });
@@ -150,13 +160,22 @@ app.get("/quote", (c) => {
   });
 });
 
-// Refill endpoint (x402 gated)
+// Helper to get payment token type from request
+function getPaymentTokenType(c: any): PaymentTokenType {
+  const queryToken = c.req.query("payWith");
+  const headerToken = c.req.header("X-PAYMENT-TOKEN-TYPE");
+  const tokenStr = (headerToken || queryToken || "STX").toUpperCase();
+  return tokenStr === "SBTC" ? "sBTC" : "STX";
+}
+
+// Refill endpoint (x402 gated - accepts STX or sBTC)
 app.post("/refill", async (c) => {
   const paymentHeader = c.req.header("X-Payment");
   const body = await c.req.json().catch(() => ({}));
   const token = ((body as any).token || "STX").toUpperCase() as TokenType;
   const amount = parseInt((body as any).amount || "1000000");
   const recipient = (body as any).recipient;
+  const payWith = getPaymentTokenType(c);
 
   // Validate inputs
   if (!recipient) {
@@ -181,25 +200,46 @@ app.post("/refill", async (c) => {
 
   const stxCost = Math.ceil(amount / tokenInfo.rate);
 
+  // Calculate payment amount based on payment token
+  let paymentAmount: number;
+  if (payWith === "sBTC") {
+    // Convert STX cost to sats (rough BTC equivalence)
+    paymentAmount = Math.ceil(stxCost / PAYMENT_RATES.sBTC);
+  } else {
+    paymentAmount = stxCost;
+  }
+
   // If no payment, return 402
   if (!paymentHeader) {
     const nonce = crypto.randomUUID().replace(/-/g, "");
 
-    return c.json({
-      maxAmountRequired: stxCost.toString(),
+    const paymentRequest: any = {
+      maxAmountRequired: paymentAmount.toString(),
       resource: "/refill",
       payTo: c.env.PAYMENT_ADDRESS,
       network: "mainnet",
       nonce,
       expiresAt: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
-      tokenType: "STX",
+      tokenType: payWith,
       quote: {
         token,
         requestedAmount: amount,
         stxCost,
         recipient,
+        payWith,
+        paymentAmount,
       },
-    }, 402);
+    };
+
+    // Add token contract for sBTC
+    if (payWith === "sBTC") {
+      paymentRequest.tokenContract = {
+        address: "SP3K8BC0PPEVCV7NZ6QSRWPQ2JE9E5B6N3PA0KBR9",
+        name: "token-sbtc",
+      };
+    }
+
+    return c.json(paymentRequest, 402);
   }
 
   // Check if refill wallet is configured
